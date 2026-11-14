@@ -73,11 +73,22 @@ class UserAdmin(ModelView, model=User):
 
     can_delete = False  # silmək əvəzinə "Aktiv" işarəsi götürülür
 
-    column_list = [User.id, User.login, User.ad, User.rol, User.manager, User.active]
-    column_searchable_list = [User.login, User.ad]
+    column_list = [
+        User.id,
+        User.login,
+        User.ad,
+        User.email,
+        User.telefon,
+        User.rol,
+        User.manager,
+        User.active,
+    ]
+    column_searchable_list = [User.login, User.ad, User.email]
     column_labels = {
         User.login: "Login",
         User.ad: "Ad",
+        User.email: "E-poçt",
+        User.telefon: "Telefon",
         User.rol: "Rol",
         User.manager: "Menecer",
         User.parol_hash: "Şifrə",
@@ -87,6 +98,9 @@ class UserAdmin(ModelView, model=User):
     form_columns = [
         User.login,
         User.ad,
+        User.email,
+        User.telefon,
+        User.whatsapp,
         User.rol,
         User.manager,
         User.parol_hash,

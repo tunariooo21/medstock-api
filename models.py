@@ -26,6 +26,9 @@ class User(SQLModel, table=True):
     ad: str
     rol: str  # "admin", "manager" və ya "representative"
     parol_hash: str
+    email: str | None = Field(default=None, unique=True, index=True)
+    telefon: str | None = None
+    whatsapp: str | None = None
     manager_id: int | None = Field(default=None, foreign_key="users.id", index=True)
     active: bool = True
     created_at: datetime = yaradilma_vaxti()
@@ -235,3 +238,19 @@ class Setting(SQLModel, table=True):
     deyer: str
     created_at: datetime = yaradilma_vaxti()
     created_by: int | None = yaradan()
+
+
+class PasswordReset(SQLModel, table=True):
+    """Şifrə bərpası üçün e-poçtla göndərilən birdəfəlik kod."""
+
+    __tablename__ = "password_resets"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    kod_hash: str
+    bitme: datetime
+    istifade: bool = False
+    cehd: int = 0
+    created_at: datetime = yaradilma_vaxti()
+
+    user: Optional["User"] = Relationship()
