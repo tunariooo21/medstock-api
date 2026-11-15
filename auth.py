@@ -1,3 +1,6 @@
+import base64
+import binascii
+import io
 import hashlib
 import hmac
 import logging
@@ -15,7 +18,8 @@ from sqlmodel import Session, select
 
 import email_service
 from database import engine
-from models import PasswordReset, Region, User, UserRegion
+from models import PasswordReset, Region, User, UserPhoto, UserRegion
+from PIL import Image, ImageOps, UnidentifiedImageError
 from security import parol_hashle, parol_yoxla
 
 # database.py import edildikdə .env oxunur. Açar yoxdursa server işə düşmür.
@@ -70,6 +74,10 @@ class ProfilData(BaseModel):
     ad: str = Field(min_length=2, max_length=80)
     telefon: str | None = None
     whatsapp: str | None = None
+
+
+class PhotoData(BaseModel):
+    data: str = Field(max_length=2800000)
 
 
 def token_yarat(user: User) -> str:
@@ -134,7 +142,9 @@ def _me_data(user: User) -> dict:
             .where(UserRegion.user_id == user.id, Region.active == True)  # noqa: E712
             .order_by(Region.ad)
         ).all()
+        photo = session.get(UserPhoto, user.id)
     return {
+        "photo": photo.data if photo else None,
         "id": user.id,
         "ad": user.ad,
         "login": user.login,
@@ -348,6 +358,43 @@ def profil_yenile(data: ProfilData, user: User = Depends(cari_user)):
         session.commit()
         session.refresh(db_user)
         return _me_data(db_user)
+
+
+@router.put("/me/photo")
+def photo_yenile(data: PhotoData, user: User = Depends(cari_user)):
+    try:
+        prefiks, kod = data.data.split(",", 1)
+        if prefiks not in ("data:image/png;base64", "data:image/jpeg;base64"):
+            raise ValueError
+        baytlar = base64.b64decode(kod, validate=True)
+        if len(baytlar) > 2 * 1024 * 1024:
+            raise ValueError
+        with Image.open(io.BytesIO(baytlar)) as sekil:
+            if sekil.format not in ("PNG", "JPEG") or max(sekil.size) > 4096 or sekil.width * sekil.height > 16000000:
+                raise ValueError
+            sekil.load()
+            sekil = ImageOps.exif_transpose(sekil).convert("RGB")
+            sekil.thumbnail((512, 512))
+            fayl = io.BytesIO()
+            sekil.save(fayl, format="JPEG", quality=85)
+    except (ValueError, binascii.Error, OSError, UnidentifiedImageError, Image.DecompressionBombError):
+        raise HTTPException(422, "Şəkil PNG/JPEG olmalı, 2 MB və 4096 pikseli keçməməlidir")
+    with Session(engine) as session:
+        photo = session.get(UserPhoto, user.id) or UserPhoto(user_id=user.id, data="")
+        photo.data = "data:image/jpeg;base64," + base64.b64encode(fayl.getvalue()).decode("ascii")
+        session.add(photo)
+        session.commit()
+    return _me_data(user)
+
+
+@router.delete("/me/photo")
+def photo_sil(user: User = Depends(cari_user)):
+    with Session(engine) as session:
+        photo = session.get(UserPhoto, user.id)
+        if photo:
+            session.delete(photo)
+            session.commit()
+    return _me_data(user)
 
 
 @router.post("/me/password")

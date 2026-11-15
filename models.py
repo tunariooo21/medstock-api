@@ -256,6 +256,55 @@ class Setting(SQLModel, table=True):
     created_by: int | None = yaradan()
 
 
+class StockRequest(SQLModel, table=True):
+    __tablename__ = "stock_requests"
+    __table_args__ = (
+        CheckConstraint("status IN ('qaralama', 'gonderildi', 'gozleyir', 'tesdiqlendi')", name="ck_stock_request_status"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    status: str = "qaralama"
+    menecer_serhi: str | None = None
+    created_at: datetime = yaradilma_vaxti()
+
+
+class StockRequestRow(SQLModel, table=True):
+    __tablename__ = "stock_request_rows"
+    __table_args__ = (
+        UniqueConstraint("request_id", "point_id", "medicine_id", name="uq_stock_request_row"),
+        CheckConstraint("say > 0 AND say <= 100000", name="ck_stock_request_quantity"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    request_id: int = Field(foreign_key="stock_requests.id", index=True)
+    point_id: int = Field(foreign_key="points.id")
+    medicine_id: int = Field(foreign_key="medicines.id")
+    say: int
+
+
+class Notification(SQLModel, table=True):
+    __tablename__ = "notifications"
+    __table_args__ = (
+        UniqueConstraint("user_id", "request_id", "kind", name="uq_request_notification"),
+        CheckConstraint("kind IN ('submitted', 'gozleyir', 'tesdiqlendi')", name="ck_notification_kind"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    request_id: int = Field(foreign_key="stock_requests.id", index=True)
+    kind: str
+    read: bool = False
+    created_at: datetime = yaradilma_vaxti()
+
+
+class UserPhoto(SQLModel, table=True):
+    __tablename__ = "user_photos"
+
+    user_id: int = Field(foreign_key="users.id", primary_key=True)
+    data: str
+
+
 class PasswordReset(SQLModel, table=True):
     """Şifrə bərpası üçün e-poçtla göndərilən birdəfəlik kod."""
 
