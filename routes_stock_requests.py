@@ -184,12 +184,29 @@ def taleb_gonder(taleb_id: int, user: User = Depends(NUMAYENDE)):
         return taleb_cavabi(session, taleb)
 
 
-@router.post("/stock-requests/{taleb_id}/decision")
+@router.post(
+    "/stock-requests/{taleb_id}/decision",
+    description="Approval records incoming stock at each selected pharmacy in the same transaction as the decision. Holding does not change stock.",
+)
 def taleb_qerari(taleb_id: int, data: QerarGiris, user: User = Depends(MENECER)):
     with Session(engine) as session:
         taleb = taleb_tap(session, taleb_id, user)
         if taleb.status not in ("gonderildi", "gozleyir") or data.status == taleb.status:
             raise HTTPException(409, "Bu stok tələbi üçün qərar artıq verilib")
+        if data.status == "tesdiqlendi":
+            sahib = session.get(User, taleb.user_id)
+            tarix = bu_gun()
+            setirler = session.exec(select(StockRequestRow).where(StockRequestRow.request_id == taleb.id).order_by(StockRequestRow.id)).all()
+            for s in setirler:
+                p = nokte_yoxla(session, s.point_id, sahib)
+                if p.novu != "aptek":
+                    raise HTTPException(422, "Stok tələbi üçün aptek seçin")
+                derman_yoxla(session, s.medicine_id)
+                session.add(StockMovement(
+                    point_id=p.id, medicine_id=s.medicine_id, user_id=user.id,
+                    novu="daxilolma", say=s.say, tarix=tarix,
+                    sebeb=f"Stok tələbi #{taleb.id}", created_by=user.id,
+                ))
         taleb.status = data.status
         taleb.menecer_serhi = (data.serh or "").strip() or None
         session.add(taleb)

@@ -16,7 +16,7 @@ from sqlmodel import SQLModel, Session, select
 from auth import router as auth_router, token_yarat
 from database import engine
 from models import Medicine, Notification, Point, Region, StockMovement, User, UserRegion
-from routes_stock import bu_gun
+from routes_stock import bu_gun, nokte_qaliqi
 from routes_stock_requests import router
 
 app = FastAPI()
@@ -83,7 +83,7 @@ class StockRequestTests(unittest.TestCase):
         self.assertEqual(self.call("GET", f"/stock-requests/{rid}").json()["setirler"][0]["say"], 42)
         self.assertEqual(self.call("GET", f"/stock-requests/{rid}").json()["setirler"][0]["point_id"], 2)
 
-    def test_submit_hold_approve_notifications_no_stock_change(self):
+    def test_submit_hold_approve_notifications_and_incoming_stock(self):
         rid = self.create()
         self.submit(rid)
         self.assertEqual(self.call("POST", f"/stock-requests/{rid}/submit").status_code, 409)
@@ -101,13 +101,64 @@ class StockRequestTests(unittest.TestCase):
             self.assertEqual(r.status_code, 200, r.text)
             self.assertEqual(self.call("GET", "/notifications", 1).json()["unread"], 0)
             self.assertEqual(self.call("POST", f"/stock-requests/{rid}/decision", 1, {"status": status}).status_code, 409)
+            with Session(engine) as s:
+                self.assertEqual(len(s.exec(select(StockMovement)).all()), 4 if status == "gozleyir" else 5)
+                self.assertEqual(nokte_qaliqi(s, 1, 1), 5 if status == "gozleyir" else 35)
         self.assertEqual(self.call("POST", f"/notifications/{nid}/read", 1).status_code, 200)
         self.assertEqual(self.call("GET", "/notifications", 3).json()["unread"], 2)
         self.assertEqual(self.call("GET", f"/stock-requests/{rid}").json()["status"], "tesdiqlendi")
         self.assertEqual(self.call("POST", f"/stock-requests/{rid}/decision", 1, {"status": "gozleyir"}).status_code, 409)
         with Session(engine) as s:
-            self.assertEqual(len(s.exec(select(StockMovement)).all()), 4)
+            movements = s.exec(select(StockMovement).order_by(StockMovement.id)).all()
+            self.assertEqual(len(movements), 5)
+            incoming = movements[-1]
+            self.assertEqual((incoming.point_id, incoming.medicine_id, incoming.say, incoming.novu), (1, 1, 30, "daxilolma"))
+            self.assertEqual((incoming.user_id, incoming.created_by, incoming.tarix, incoming.sebeb), (1, 1, bu_gun(), f"Stok tələbi #{rid}"))
             self.assertEqual(len(s.exec(select(Notification)).all()), 3)
+
+    def test_direct_approval_adds_each_pharmacy_once(self):
+        rid = self.create([{"point_id": 1, "medicine_id": 1, "say": 25}, {"point_id": 2, "medicine_id": 1, "say": 50}])
+        self.submit(rid)
+        r = self.call("POST", f"/stock-requests/{rid}/decision", 1, {"status": "tesdiqlendi"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(self.call("POST", f"/stock-requests/{rid}/decision", 1, {"status": "tesdiqlendi"}).status_code, 409)
+        with Session(engine) as s:
+            self.assertEqual(len(s.exec(select(StockMovement)).all()), 6)
+            self.assertEqual(nokte_qaliqi(s, 1, 1), 30)
+            self.assertEqual(nokte_qaliqi(s, 2, 1), 50)
+            self.assertEqual(nokte_qaliqi(s, 3, 1), 0)
+        self.assertEqual({i["point_id"] for i in self.call("GET", "/stock-requests/options").json()["items"]}, {3})
+        self.assertEqual(self.call("GET", "/notifications", 3).json()["unread"], 1)
+
+    def test_invalid_approval_target_rolls_back_all_rows(self):
+        rid = self.create([{"point_id": 1, "medicine_id": 1, "say": 25}, {"point_id": 2, "medicine_id": 1, "say": 50}])
+        self.submit(rid)
+        with Session(engine) as s:
+            point = s.get(Point, 2)
+            point.active = False
+            s.add(point)
+            s.commit()
+        r = self.call("POST", f"/stock-requests/{rid}/decision", 1, {"status": "tesdiqlendi"})
+        self.assertEqual(r.status_code, 404, r.text)
+        self.assertEqual(self.call("GET", f"/stock-requests/{rid}").json()["status"], "gonderildi")
+        self.assertEqual(self.call("GET", "/notifications", 1).json()["unread"], 1)
+        self.assertEqual(self.call("GET", "/notifications", 3).json()["unread"], 0)
+        with Session(engine) as s:
+            self.assertEqual(len(s.exec(select(StockMovement)).all()), 4)
+            self.assertEqual(nokte_qaliqi(s, 1, 1), 5)
+            self.assertEqual(len(s.exec(select(Notification)).all()), 1)
+
+    def test_submitted_request_can_be_approved_after_stock_recovers(self):
+        rid = self.create()
+        self.submit(rid)
+        with Session(engine) as s:
+            for pid in (1, 2, 3):
+                s.add(StockMovement(point_id=pid, medicine_id=1, user_id=3, novu="daxilolma", say=100, tarix=bu_gun()))
+            s.commit()
+        r = self.call("POST", f"/stock-requests/{rid}/decision", 1, {"status": "tesdiqlendi"})
+        self.assertEqual(r.status_code, 200, r.text)
+        with Session(engine) as s:
+            self.assertEqual(nokte_qaliqi(s, 1, 1), 135)
 
     def test_input_scope_and_eligibility(self):
         for quantity in (0, -1, 100001, 1.5, "2", True):
