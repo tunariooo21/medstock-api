@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 import os
 import re
 import secrets
@@ -31,6 +32,7 @@ TELEFON_RE = re.compile(r"^\+?[0-9][0-9\s\-()]{6,19}$")
 
 bearer = HTTPBearer(auto_error=False)
 router = APIRouter()
+logger = logging.getLogger("medstock.auth")
 
 
 class LoginData(BaseModel):
@@ -251,7 +253,8 @@ def parolu_unutdum(data: EmailData):
 
     try:
         email_service.kod_gonder(email, kod, ad)
-    except email_service.EmailXetasi:
+    except email_service.EmailXetasi as xeta:
+        logger.exception("SMTP göndərişi alınmadı: %s", xeta)
         raise HTTPException(
             status_code=502,
             detail="E-poçt göndərilmədi. Bir az sonra yenidən cəhd edin",

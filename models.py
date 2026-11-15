@@ -200,6 +200,22 @@ class Prescription(SQLModel, table=True):
     created_by: int | None = yaradan()
 
 
+class RecordAudit(SQLModel, table=True):
+    """Qeyd düzəlişi/silmə tarixçəsi (audit jurnalı)."""
+
+    __tablename__ = "record_audits"
+    __table_args__ = (Index("ix_record_audits_entity", "entity", "entity_id"),)
+
+    id: int | None = Field(default=None, primary_key=True)
+    entity: str  # "movement" və ya "prescription"
+    entity_id: int
+    action: str  # "update" və ya "delete"
+    evvelki: str | None = None  # JSON görüntüsü
+    sonraki: str | None = None  # JSON görüntüsü
+    user_id: int | None = Field(default=None, foreign_key="users.id")
+    created_at: datetime = yaradilma_vaxti()
+
+
 class MonthlyReport(SQLModel, table=True):
     __tablename__ = "monthly_reports"
     __table_args__ = (UniqueConstraint("user_id", "ay", name="uq_monthly_reports_user_ay"),)
