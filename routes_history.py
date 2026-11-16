@@ -2,12 +2,15 @@ import calendar
 import io
 import json
 from datetime import date, datetime
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from auth import rol_teleb_et
@@ -15,6 +18,7 @@ from database import engine
 from models import (
     Doctor,
     Medicine,
+    MedicinePrice,
     Point,
     Prescription,
     RecordAudit,
@@ -168,85 +172,142 @@ def tarixce(
 @router.get("/history/export")
 def tarixce_ixrac(
     region: int = Query(..., description="Region id"),
-    month: str | None = Query(default=None, description="YYYY-AA; boşdursa bütün tarixçə"),
+    month: str | None = Query(default=None, description="YYYY-AA; boşdursa bütün satışlar"),
     user: User = Depends(OXUYAN),
 ):
     ay = ay_oxu(month) if month else None
+    bugun = bu_gun()
+    if ay and ay > bugun.replace(day=1):
+        raise HTTPException(status_code=400, detail="Gələcək ay üçün məlumat yoxdur")
+    bas = ay or date(2000, 1, 1)
+    son = min(ay_son_gunu(ay), bugun) if ay else bugun
     with Session(engine) as session:
         region_ad = region_yoxla(session, region, user)
-        kartlar = tarixce_sorgula(session, region, None, ay)
+        noqteler = session.exec(
+            select(Point)
+            .where(Point.region_id == region, Point.active == True)  # noqa: E712
+            .order_by(Point.novu, Point.ad, Point.id)
+        ).all()
+        dermanlar = session.exec(
+            select(Medicine)
+            .where(Medicine.active == True)  # noqa: E712
+            .order_by(Medicine.id)
+        ).all()
+        noqtelerin_idleri = [p.id for p in noqteler]
+        derman_idleri = [d.id for d in dermanlar]
+        satislar = {
+            (pid, mid): int(say)
+            for pid, mid, say in session.exec(
+                select(M.point_id, M.medicine_id, func.sum(M.say))
+                .where(
+                    M.point_id.in_(noqtelerin_idleri),
+                    M.medicine_id.in_(derman_idleri),
+                    M.user_id == user.id,
+                    M.novu == "satis",
+                    M.tarix >= bas,
+                    M.tarix <= son,
+                )
+                .group_by(M.point_id, M.medicine_id)
+            ).all()
+        }
+        qiymetler = {}
+        for qiymet in session.exec(
+            select(MedicinePrice)
+            .where(
+                MedicinePrice.medicine_id.in_(derman_idleri),
+                MedicinePrice.baslama_tarixi <= son,
+            )
+            .order_by(MedicinePrice.baslama_tarixi.desc(), MedicinePrice.id.desc())
+        ).all():
+            qiymetler.setdefault(qiymet.medicine_id, qiymet.qiymet)
 
         kitab = Workbook()
         varag = kitab.active
-        varag.title = "Qeydlər"
+        varag.title = "Satış"
         varag.sheet_view.rightToLeft = False
-
-        basliq_reng = PatternFill("solid", fgColor="0E7490")
-        basliq_yazi = Font(bold=True, color="FFFFFF")
-        varag.append(
-            [
-                f"{region_ad} · "
-                + (ay.strftime("%Y-%m") if ay else "bütün tarixçə")
-                + f" · {len(kartlar)} qeyd"
-            ]
-        )
-        varag["A1"].font = Font(bold=True, size=12)
-        varag["A1"].data_type = "s"
-        varag.append([])
-        varag.merge_cells("A1:G1")
-        sutunlar = ["Tarix", "Növ", "Dərman", "Məntəqə", "Say", "Qeyd/Həkim", "İşçi"]
-        varag.append(sutunlar)
-        for hucre in varag[3]:
-            hucre.fill = basliq_reng
-            hucre.font = basliq_yazi
-            hucre.alignment = Alignment(horizontal="center")
-
-        for k in kartlar:
-            varag.append(
-                [
-                    k["tarix"],
-                    NOVLAR.get(k["novu"], k["novu"]),
-                    k["derman"],
-                    k["point_ad"],
-                    k["say"],
-                    k["sebeb"] or k.get("hekim") or "",
-                    k["user_ad"] or "",
-                ]
-            )
-        varag.freeze_panes = "A4"
-        varag.auto_filter.ref = f"A3:G{varag.max_row}"
+        varag.sheet_view.showGridLines = False
+        say_sutunu = len(noqteler) + 2
+        qiymet_sutunu = say_sutunu + 1
+        cem_sutunu = say_sutunu + 2
+        son_sutun = get_column_letter(cem_sutunu)
+        varag.append([region_ad, f"Nümayəndə adı: {user.ad}"])
+        basliq_sonu = len(noqteler) + 1 if noqteler else cem_sutunu
+        if basliq_sonu > 2:
+            varag.merge_cells(start_row=1, start_column=2, end_row=1, end_column=basliq_sonu)
+        varag.append(["Dərman adı", *[p.ad for p in noqteler], "Say", "Qiymət", "Cəm"])
+        cemi_say = 0
+        cemi_pul = Decimal("0")
+        qiymet_catismir = False
+        for derman in dermanlar:
+            saylar = [satislar.get((p.id, derman.id), 0) for p in noqteler]
+            say = sum(saylar)
+            qiymet = qiymetler.get(derman.id)
+            cem = (qiymet * say).quantize(Decimal("0.01")) if qiymet is not None else None
+            if say and qiymet is None:
+                qiymet_catismir = True
+            cemi_say += say
+            cemi_pul += cem or Decimal("0")
+            varag.append([
+                derman.ad,
+                *[s if s else None for s in saylar],
+                say,
+                float(qiymet) if qiymet is not None else None,
+                float(cem) if cem is not None else (None if say else 0),
+            ])
+        son_derman_setri = varag.max_row
+        varag.append(["Cəmi mal", *[None for _ in noqteler], cemi_say, None, None])
+        varag.append(["Cəmi pul", *[None for _ in noqteler], None, None,
+                      None if qiymet_catismir else float(cemi_pul)])
+        ince = Side(style="thin", color="D5E3E7")
+        serhed = Border(left=ince, right=ince, top=ince, bottom=ince)
+        for setir in varag.iter_rows():
+            for hucre in setir:
+                if isinstance(hucre.value, str):
+                    hucre.data_type = "s"
+                hucre.font = Font(name="Calibri", size=10)
+                hucre.border = serhed
+                hucre.alignment = Alignment(
+                    vertical="center", wrap_text=True,
+                    horizontal="left" if hucre.column == 1 else "right",
+                )
+                if hucre.column in (qiymet_sutunu, cem_sutunu) and hucre.row > 2:
+                    hucre.number_format = '#,##0.00'
+        for setir in (1, 2):
+            for hucre in varag[setir]:
+                hucre.fill = PatternFill("solid", fgColor="0E7490")
+                hucre.font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+                hucre.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            varag.row_dimensions[setir].height = 32
+        for setir in (son_derman_setri + 1, son_derman_setri + 2):
+            for hucre in varag[setir]:
+                hucre.fill = PatternFill("solid", fgColor="E2EFF0")
+                hucre.font = Font(name="Calibri", size=11, bold=True, color="16313C")
+        varag.column_dimensions["A"].width = 28
+        for sutun in range(2, say_sutunu):
+            varag.column_dimensions[get_column_letter(sutun)].width = 15
+        for sutun, en in ((say_sutunu, 9), (qiymet_sutunu, 12), (cem_sutunu, 15)):
+            varag.column_dimensions[get_column_letter(sutun)].width = en
+        varag.freeze_panes = "B3"
+        varag.auto_filter.ref = f"A2:{son_sutun}{son_derman_setri}"
         varag.sheet_properties.pageSetUpPr.fitToPage = True
         varag.page_setup.orientation = "landscape"
         varag.page_setup.paperSize = varag.PAPERSIZE_A4
         varag.page_setup.fitToWidth = 1
         varag.page_setup.fitToHeight = 0
-        varag.print_title_rows = "1:3"
+        varag.print_title_rows = "1:2"
         varag.print_options.horizontalCentered = True
-        varag.print_area = f"A1:G{varag.max_row}"
-        for setir in varag.iter_rows(min_row=4):
-            for hucre in setir:
-                if hucre.data_type == "f":
-                    hucre.data_type = "s"
-                hucre.font = Font(size=10)
-                hucre.alignment = Alignment(
-                    vertical="top", wrap_text=True,
-                    horizontal="right" if hucre.column == 5 else "left",
-                )
-        enler = [12, 14, 18, 18, 6, 20, 16]
-        for i, en in enumerate(enler, start=1):
-            varag.column_dimensions[
-                chr(ord("A") + i - 1)
-            ].width = en
+        varag.print_area = f"A1:{son_sutun}{varag.max_row}"
 
         bufer = io.BytesIO()
         kitab.save(bufer)
+        kitab.close()
         bufer.seek(0)
         ay_hissesi = ay.strftime("%Y-%m") if ay else "butun"
         return StreamingResponse(
             bufer,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             headers={
-                "Content-Disposition": f'attachment; filename="medstock-qeydler-{region}-{ay_hissesi}.xlsx"'
+                "Content-Disposition": f'attachment; filename="medstock-satis-{region}-{ay_hissesi}.xlsx"'
             },
         )
 

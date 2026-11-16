@@ -3,6 +3,8 @@ import io
 import os
 import tempfile
 import unittest
+from datetime import timedelta
+from decimal import Decimal
 
 _TEMP = tempfile.TemporaryDirectory(prefix="medstock-requests-")
 os.environ["DATABASE_URL"] = "sqlite:///" + _TEMP.name.replace("\\", "/") + "/test.db"
@@ -15,7 +17,7 @@ from sqlmodel import SQLModel, Session, select
 
 from auth import router as auth_router, token_yarat
 from database import engine
-from models import Medicine, Notification, Point, Region, StockMovement, User, UserRegion
+from models import Medicine, MedicinePrice, Notification, Point, Region, StockMovement, User, UserRegion
 from routes_stock import bu_gun, nokte_qaliqi
 from routes_stock_requests import router
 from routes_history import router as history_router
@@ -201,35 +203,124 @@ class StockRequestTests(unittest.TestCase):
         self.assertEqual(self.call("POST", f"/notifications/{nid}/read", 1).status_code, 404)
         self.assertEqual(self.call("GET", f"/stock-requests/{rid}", 2).status_code, 200)
 
-    def test_compact_excel_preserves_records_and_text(self):
+    def test_sales_excel_has_all_region_points_and_only_own_sales(self):
         from openpyxl import load_workbook
 
-        note = '=HYPERLINK("https://example.invalid","note")'
+        today = bu_gun()
         with Session(engine) as s:
-            s.add(StockMovement(point_id=1, medicine_id=1, user_id=3, created_by=3,
-                                novu="geri_qaytarma", say=7, tarix=bu_gun(), sebeb=note))
+            s.add(MedicinePrice(medicine_id=1, qiymet=Decimal("1.25"), baslama_tarixi=today))
+            s.add(MedicinePrice(medicine_id=2, qiymet=Decimal("3.40"), baslama_tarixi=today))
+            for pid, mid, quantity, uid, kind in [
+                (1, 1, 3, 3, "satis"), (2, 1, 4, 3, "satis"), (3, 1, 2, 3, "satis"),
+                (1, 2, 2, 3, "satis"), (1, 1, 99, 4, "satis"), (4, 1, 99, 3, "satis"),
+                (5, 1, 99, 3, "satis"), (1, 3, 99, 3, "satis"),
+                (1, 1, 7, 3, "geri_qaytarma"),
+            ]:
+                s.add(StockMovement(point_id=pid, medicine_id=mid, user_id=uid, created_by=6,
+                                    novu=kind, say=quantity, tarix=today))
             s.commit()
-        month = bu_gun().strftime("%Y-%m")
-        r = self.call("GET", f"/history/export?region=1&month={month}")
-        self.assertEqual(r.status_code, 200, r.text if r.status_code != 200 else "")
+        r = self.call("GET", f"/history/export?region=1&month={today:%Y-%m}&point_id=1")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("medstock-satis-1-", r.headers["content-disposition"])
         book = load_workbook(io.BytesIO(r.content))
         sheet = book.active
-        self.assertEqual(sheet.max_column, 7)
-        self.assertEqual(sheet.max_row, 8)
-        self.assertEqual([c.value for c in sheet[3]],
-                         ["Tarix", "Növ", "Dərman", "Məntəqə", "Say", "Qeyd/Həkim", "İşçi"])
-        row = next(row for row in sheet.iter_rows(min_row=4) if row[5].value == note)
-        self.assertEqual([c.value for c in row],
-                         [bu_gun().isoformat(), "Geri qaytarma", "Low Medicine", "Pharmacy One", 7, note, "Rep One"])
-        self.assertEqual(row[5].data_type, "s")
-        self.assertEqual(row[4].data_type, "n")
-        self.assertTrue(row[5].alignment.wrap_text)
-        self.assertLess(sum(sheet.column_dimensions[c].width for c in "ABCDEFG"), 126)
-        self.assertEqual(sheet.freeze_panes, "A4")
-        self.assertEqual(sheet.auto_filter.ref, "A3:G8")
+        self.assertEqual(sheet.title, "Satış")
+        self.assertEqual(sheet["A1"].value, "Region One")
+        self.assertEqual(sheet["B1"].value, "Nümayəndə adı: Rep One")
+        self.assertEqual([c.value for c in sheet[2]],
+                         ["Dərman adı", "Pharmacy One", "Pharmacy Two", "Depot", "Say", "Qiymət", "Cəm"])
+        self.assertEqual([c.value for c in sheet[3]], ["Low Medicine", 3, 4, 2, 9, 1.25, 11.25])
+        self.assertEqual([c.value for c in sheet[4]], ["Normal Medicine", 2, None, None, 2, 3.4, 6.8])
+        self.assertEqual((sheet["A5"].value, sheet["E5"].value), ("Cəmi mal", 11))
+        self.assertEqual((sheet["A6"].value, sheet["G6"].value), ("Cəmi pul", 18.05))
+        self.assertEqual((sheet.max_column, sheet.max_row), (7, 6))
+        self.assertEqual(sheet.freeze_panes, "B3")
+        self.assertEqual(sheet.auto_filter.ref, "A2:G4")
         self.assertEqual(sheet.page_setup.fitToWidth, 1)
         self.assertEqual(sheet.page_setup.orientation, "landscape")
+        self.assertEqual(sheet["G3"].data_type, "n")
+        for row in sheet:
+            for cell in row:
+                self.assertNotEqual(cell.data_type, "f")
+        book.close()
+
+    def test_sales_excel_month_and_effective_prices(self):
+        from openpyxl import load_workbook
+
+        today = bu_gun()
+        previous = today.replace(day=1) - timedelta(days=1)
+        with Session(engine) as s:
+            for price, start in [("1.10", previous), ("1.25", today), ("9.00", today + timedelta(days=1))]:
+                s.add(MedicinePrice(medicine_id=1, qiymet=Decimal(price), baslama_tarixi=start))
+            for quantity, day in [(3, today), (11, previous)]:
+                s.add(StockMovement(point_id=1, medicine_id=1, user_id=3,
+                                    novu="satis", say=quantity, tarix=day))
+            s.commit()
+        for month, quantity, price, amount in [(f"&month={today:%Y-%m}", 3, 1.25, 3.75),
+                                              (f"&month={previous:%Y-%m}", 11, 1.1, 12.1),
+                                              ("", 14, 1.25, 17.5)]:
+            r = self.call("GET", f"/history/export?region=1{month}")
+            self.assertEqual(r.status_code, 200)
+            book = load_workbook(io.BytesIO(r.content))
+            sheet = book.active
+            self.assertEqual([sheet[c].value for c in ("E3", "F3", "G3")], [quantity, price, amount])
+            book.close()
+        future = today.replace(day=28) + timedelta(days=4)
+        self.assertEqual(self.call("GET", f"/history/export?region=1&month={future:%Y-%m}").status_code, 400)
+        self.assertEqual(self.call("GET", "/history/export?region=1&month=invalid").status_code, 422)
         self.assertEqual(self.call("GET", "/history/export?region=2").status_code, 403)
+        self.assertEqual(self.client.get("/history/export?region=1").status_code, 401)
+
+    def test_sales_excel_names_stay_literal_text(self):
+        from openpyxl import load_workbook
+
+        text = '=HYPERLINK("https://example.invalid","name")'
+        with Session(engine) as s:
+            s.get(Region, 1).ad = text
+            s.get(Point, 1).ad = text
+            s.get(Medicine, 1).ad = text
+            s.get(User, 3).ad = text
+            s.commit()
+        r = self.call("GET", "/history/export?region=1")
+        self.assertEqual(r.status_code, 200)
+        book = load_workbook(io.BytesIO(r.content))
+        sheet = book.active
+        for address in ("A1", "B2", "A3"):
+            self.assertEqual(sheet[address].value, text)
+            self.assertEqual(sheet[address].data_type, "s")
+        self.assertEqual(sheet["B1"].value, "Nümayəndə adı: " + text)
+        book.close()
+
+    def test_sales_excel_missing_price_does_not_understate_total(self):
+        from openpyxl import load_workbook
+
+        with Session(engine) as s:
+            s.add(StockMovement(point_id=1, medicine_id=1, user_id=3,
+                                novu="satis", say=3, tarix=bu_gun()))
+            s.commit()
+        book = load_workbook(io.BytesIO(self.call("GET", "/history/export?region=1").content))
+        sheet = book.active
+        self.assertEqual(sheet["E3"].value, 3)
+        self.assertIsNone(sheet["F3"].value)
+        self.assertIsNone(sheet["G3"].value)
+        self.assertEqual(sheet["E5"].value, 3)
+        self.assertIsNone(sheet["G6"].value)
+        book.close()
+
+    def test_sales_excel_empty_region_is_valid(self):
+        from openpyxl import load_workbook
+
+        with Session(engine) as s:
+            for pid in (1, 2, 3):
+                s.get(Point, pid).active = False
+            s.commit()
+        r = self.call("GET", "/history/export?region=1")
+        self.assertEqual(r.status_code, 200)
+        book = load_workbook(io.BytesIO(r.content))
+        sheet = book.active
+        self.assertEqual([c.value for c in sheet[2]], ["Dərman adı", "Say", "Qiymət", "Cəm"])
+        self.assertEqual(sheet["B5"].value, 0)
+        self.assertEqual(sheet["D6"].value, 0)
         book.close()
 
     def test_photo_validation_persistence_and_removal(self):
