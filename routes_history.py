@@ -181,7 +181,7 @@ def tarixce_ixrac(
         varag.title = "Qeydlər"
         varag.sheet_view.rightToLeft = False
 
-        basliq_reng = PatternFill("solid", fgColor="22A33C")
+        basliq_reng = PatternFill("solid", fgColor="0E7490")
         basliq_yazi = Font(bold=True, color="FFFFFF")
         varag.append(
             [
@@ -190,9 +190,11 @@ def tarixce_ixrac(
                 + f" · {len(kartlar)} qeyd"
             ]
         )
-        varag["A1"].font = Font(bold=True, size=13)
+        varag["A1"].font = Font(bold=True, size=12)
+        varag["A1"].data_type = "s"
         varag.append([])
-        sutunlar = ["Tarix", "Növ", "Dərman", "Aptek/Depo", "Say", "Səbəb/Həkim", "İşçi"]
+        varag.merge_cells("A1:G1")
+        sutunlar = ["Tarix", "Növ", "Dərman", "Məntəqə", "Say", "Qeyd/Həkim", "İşçi"]
         varag.append(sutunlar)
         for hucre in varag[3]:
             hucre.fill = basliq_reng
@@ -211,7 +213,26 @@ def tarixce_ixrac(
                     k["user_ad"] or "",
                 ]
             )
-        enler = [12, 16, 24, 22, 8, 24, 20]
+        varag.freeze_panes = "A4"
+        varag.auto_filter.ref = f"A3:G{varag.max_row}"
+        varag.sheet_properties.pageSetUpPr.fitToPage = True
+        varag.page_setup.orientation = "landscape"
+        varag.page_setup.paperSize = varag.PAPERSIZE_A4
+        varag.page_setup.fitToWidth = 1
+        varag.page_setup.fitToHeight = 0
+        varag.print_title_rows = "1:3"
+        varag.print_options.horizontalCentered = True
+        varag.print_area = f"A1:G{varag.max_row}"
+        for setir in varag.iter_rows(min_row=4):
+            for hucre in setir:
+                if hucre.data_type == "f":
+                    hucre.data_type = "s"
+                hucre.font = Font(size=10)
+                hucre.alignment = Alignment(
+                    vertical="top", wrap_text=True,
+                    horizontal="right" if hucre.column == 5 else "left",
+                )
+        enler = [12, 14, 18, 18, 6, 20, 16]
         for i, en in enumerate(enler, start=1):
             varag.column_dimensions[
                 chr(ord("A") + i - 1)

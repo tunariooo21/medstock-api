@@ -18,10 +18,12 @@ from database import engine
 from models import Medicine, Notification, Point, Region, StockMovement, User, UserRegion
 from routes_stock import bu_gun, nokte_qaliqi
 from routes_stock_requests import router
+from routes_history import router as history_router
 
 app = FastAPI()
 app.include_router(auth_router)
 app.include_router(router)
+app.include_router(history_router)
 
 
 def tearDownModule():
@@ -198,6 +200,37 @@ class StockRequestTests(unittest.TestCase):
         self.assertEqual(self.call("GET", "/notifications", 1).json()["unread"], 0)
         self.assertEqual(self.call("POST", f"/notifications/{nid}/read", 1).status_code, 404)
         self.assertEqual(self.call("GET", f"/stock-requests/{rid}", 2).status_code, 200)
+
+    def test_compact_excel_preserves_records_and_text(self):
+        from openpyxl import load_workbook
+
+        note = '=HYPERLINK("https://example.invalid","note")'
+        with Session(engine) as s:
+            s.add(StockMovement(point_id=1, medicine_id=1, user_id=3, created_by=3,
+                                novu="geri_qaytarma", say=7, tarix=bu_gun(), sebeb=note))
+            s.commit()
+        month = bu_gun().strftime("%Y-%m")
+        r = self.call("GET", f"/history/export?region=1&month={month}")
+        self.assertEqual(r.status_code, 200, r.text if r.status_code != 200 else "")
+        book = load_workbook(io.BytesIO(r.content))
+        sheet = book.active
+        self.assertEqual(sheet.max_column, 7)
+        self.assertEqual(sheet.max_row, 8)
+        self.assertEqual([c.value for c in sheet[3]],
+                         ["Tarix", "Növ", "Dərman", "Məntəqə", "Say", "Qeyd/Həkim", "İşçi"])
+        row = next(row for row in sheet.iter_rows(min_row=4) if row[5].value == note)
+        self.assertEqual([c.value for c in row],
+                         [bu_gun().isoformat(), "Geri qaytarma", "Low Medicine", "Pharmacy One", 7, note, "Rep One"])
+        self.assertEqual(row[5].data_type, "s")
+        self.assertEqual(row[4].data_type, "n")
+        self.assertTrue(row[5].alignment.wrap_text)
+        self.assertLess(sum(sheet.column_dimensions[c].width for c in "ABCDEFG"), 126)
+        self.assertEqual(sheet.freeze_panes, "A4")
+        self.assertEqual(sheet.auto_filter.ref, "A3:G8")
+        self.assertEqual(sheet.page_setup.fitToWidth, 1)
+        self.assertEqual(sheet.page_setup.orientation, "landscape")
+        self.assertEqual(self.call("GET", "/history/export?region=2").status_code, 403)
+        book.close()
 
     def test_photo_validation_persistence_and_removal(self):
         out = io.BytesIO(); Image.new("RGB", (80, 60), "red").save(out, "PNG")
